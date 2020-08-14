@@ -12,11 +12,12 @@ import (
 
 func NewNode(port int) dhtNode {
 	// Todo: create a Node and then return it.
-	var tmp NetNode
-	tmp.core.Initialize(port)
+	tmp := new(NetNode)
+	tmp.core = new(chord.RPCNode)
+	chord.Initialize(tmp.core, port)
 
 	var result dhtNode
-	result = &tmp
+	result = tmp
 	return result
 }
 
@@ -33,16 +34,13 @@ func (node *NetNode) Run() {
 
 func (node *NetNode) Create() {
 	node.core.Node.Create()
-	go node.core.Node.Stabilize()
-	go node.core.Node.Fix_Fingers()
-	go node.core.Node.Check_Predecessor()
+	node.core.Node.Backgrounds()
 }
 
-func (node *NetNode) Join(addr string) {
-	node.core.Node.Join(addr)
-	go node.core.Node.Stabilize()
-	go node.core.Node.Fix_Fingers()
-	go node.core.Node.Check_Predecessor()
+func (node *NetNode) Join(addr string) (successful bool) {
+	successful = node.core.Node.Join(addr)
+	node.core.Node.Backgrounds()
+	return
 }
 
 func (node *NetNode) Quit() {
