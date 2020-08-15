@@ -13,7 +13,7 @@ const (
 	RING_SIZE           int = 160
 	FINGER_TABLE_SIZE       = RING_SIZE
 	SUCCESSOR_LIST_SIZE int = 10
-	
+
 	BACKGROUND_INTERVAL int = 200
 )
 
@@ -54,7 +54,7 @@ func copy_address(addr Address_Type) Address_Type {
 	return Address_Type{addr.Addr, new(big.Int).Set(addr.ID)}
 }
 
-// Chord Maintenance
+// Chord Routing and Maintenance
 /*------------------------------------------------------------------------------------------*/
 func (node *LinkNode) Find_Successor(id *big.Int, ans *Address_Type) error {
 	node.validate_successors()
@@ -98,7 +98,7 @@ func (node *LinkNode) closest_preceding_node(id *big.Int) string {
 }
 
 func (node *LinkNode) validate_successors() {
-	if node.Successor[0].Addr == node.Addr{
+	if node.Successor[0].Addr == node.Addr {
 		return
 	}
 
@@ -139,7 +139,7 @@ func (node *LinkNode) Get_Successor_List(args int, ans *[SUCCESSOR_LIST_SIZE]Add
 func (node *LinkNode) Update_Successor(nw_scsr Address_Type, ret *int) error {
 	node.node_lock.Lock()
 	defer node.node_lock.Unlock()
-	node.Successor[0] = nw_scsr
+	node.Successor[0] = copy_address(nw_scsr)
 	if node.Addr == nw_scsr.Addr {
 		return nil
 	}
@@ -172,6 +172,63 @@ func (node *LinkNode) Update_Predecessor(nw_prdcsr Address_Type, ret *int) error
 	return nil
 }
 
+// For Join
+func (node *LinkNode) link_with_successor(addr string) bool {
+	client, err := Dial(addr)
+	if err != nil {
+		return false
+	}
+	if err = client.Call("RPCNode.Find_Successor", node.ID, &node.Successor[0]); err != nil {
+		fmt.Println("RPC Call Failed in link_with_successor: Find_Successor: ", err)
+		_ = Close(client)
+		return false
+	}
+	if Close(client) != nil {
+		return false
+	}
+
+	if err = node.Update_Successor(node.Successor[0], nil); err != nil {
+		fmt.Println("Successor List Update Failed in link_with_successor: ", err)
+		return false
+	}
+	return true
+}
+
+// For Quit
+func (node *LinkNode) delink_with_predecessor() {
+	if node.Predecessor==nil || !node.Ping(node.Predecessor.Addr) {
+		fmt.Println("Chord Ring Unconnected: Predecessor")
+		return
+	}
+	client, err := Dial(node.Predecessor.Addr)
+	if err != nil {
+		return
+	}
+	if err = client.Call("RPCNode.Update_Successor", node.Successor[0], nil); err != nil {
+		fmt.Println("RPC Call Failed in delink_with_predecessor: Update_Successor: ", err)
+		_ = Close(client)
+		return
+	}
+	_ = Close(client)
+}
+func (node *LinkNode) delink_with_successor() {
+	if !node.Ping(node.Successor[0].Addr) {
+		fmt.Println("Chord Ring Unconnected: ", node.Successor[0].Addr)
+		return
+	}
+	client, err := Dial(node.Successor[0].Addr)
+	if err != nil {
+		return
+	}
+	if err = client.Call("RPCNode.Update_Predecessor", *node.Predecessor, nil); err != nil {
+		fmt.Println("RPC Call Failed in delink_with_successor: Update_Predecessor: ", err)
+		_ = Close(client)
+		return
+	}
+	_ = Close(client)
+}
+
+// Background Functions
 func (node *LinkNode) Notify(pred Address_Type, ret *int) error {
 	if node.Predecessor == nil {
 		node.Predecessor = new(Address_Type)
@@ -290,8 +347,7 @@ func (node *LinkNode) Put_Value_Successor_Backup(p Pair_Type, ret *int) error {
 		_ = Close(client)
 		return err
 	}
-	err = Close(client)
-	if err != nil {
+	if err = Close(client); err != nil {
 		return err
 	}
 	return nil
@@ -329,14 +385,12 @@ func (node *LinkNode) Delete_Key_Successor_Backup(key string, successful *bool) 
 	if err != nil {
 		return err
 	}
-	err = client.Call("RPCNode.Delete_Key_Backup", key, successful)
-	if err != nil {
+	if err = client.Call("RPCNode.Delete_Key_Backup", key, successful); err != nil {
 		fmt.Println("RPC Call Failed in Delete_Key_Successor_Backup: Delete_Key_Backup: ", err)
 		_ = Close(client)
 		return err
 	}
-	err = Close(client)
-	if err != nil {
+	if err = Close(client); err != nil {
 		return err
 	}
 	return nil
@@ -395,15 +449,13 @@ func (node *LinkNode) Receive_Quit(delivery *Data_Type, ret *int) error {
 			delete(node.Data_Backup._M_data, k)
 		}
 
-		err = client.Call("RPCNode.Put_Value_Backup", Pair_Type{k,v}, new(bool))
-		if err != nil {
+		if err = client.Call("RPCNode.Put_Value_Backup", Pair_Type{k,v}, new(bool)); err != nil {
 			fmt.Println("RPC Call Failed in Receive_Quit: Put_Value_Backup: ", err)
 			_ = Close(client)
 			return err
 		}
 	}
-	err = Close(client)
-	if err != nil {
+	if err = Close(client); err != nil {
 		return err
 	}
 	return nil
@@ -456,7 +508,7 @@ func (node *LinkNode) Create() {
 	node.Predecessor = nil
 	node.node_lock.Lock()
 	defer node.node_lock.Unlock()
-	for i := 0; i < SUCCESSOR_LIST_SIZE; i++ {
+	for i, _ := range node.Successor {
 		node.Successor[i] = node.get_address()
 	}
 }
@@ -469,35 +521,16 @@ func (node *LinkNode) Join(addr string) bool {
 
 	// set predecessor and successor list
 	node.Predecessor = nil
-
-	client, err := Dial(addr)
-	if err != nil {
-		return false
-	}
-	err = client.Call("RPCNode.Find_Successor", node.ID, &node.Successor[0])
-	if err != nil {
-		fmt.Println("RPC Call Failed in Join: Find_Successor: ", err)
-		_ = Close(client)
-		return false
-	}
-	if Close(client) != nil {
-		return false
-	}
-
-	err = node.Update_Successor(node.Successor[0], nil)
-	if err != nil {
-		fmt.Println("Successor List Update Failed in Join: ", err)
+	if !node.link_with_successor(addr) {
 		return false
 	}
 
 	// notify
-	client, err = Dial(node.Successor[0].Addr)
+	client, err := Dial(node.Successor[0].Addr)
 	if err != nil {
 		return false
 	}
-
-	err = client.Call("RPCNode.Notify", node.get_address(), nil)
-	if err != nil {
+	if err = client.Call("RPCNode.Notify", node.get_address(), nil); err != nil {
 		fmt.Println("RPC Call Failed in Join: Notify: ", err)
 		return false
 	}
@@ -531,42 +564,9 @@ func (node *LinkNode) Quit() {
 		node.Enabled = false
 		return
 	}
-
 	node.transmit_to_successor()
-
-	// update predecessor
-	if node.Predecessor==nil || !node.Ping(node.Predecessor.Addr) {
-		fmt.Println("Chord Ring Unconnected: Predecessor")
-		return
-	}
-	client, err := Dial(node.Predecessor.Addr)
-	if err != nil {
-		return
-	}
-	err = client.Call("RPCNode.Update_Successor", node.Successor[0], nil)
-	if err != nil {
-		fmt.Println("RPC Call Failed in Quit: Update_Successor: ", err)
-		_ = Close(client)
-		return
-	}
-	_ = Close(client)
-
-	// update successor
-	if !node.Ping(node.Successor[0].Addr) {
-		fmt.Println("Chord Ring Unconnected: ", node.Successor[0].Addr)
-		return
-	}
-	client, err = Dial(node.Successor[0].Addr)
-	if err != nil {
-		return
-	}
-	err = client.Call("RPCNode.Update_Predecessor", *node.Predecessor, nil)
-	if err != nil {
-		fmt.Println("RPC Call Failed in Quit: Update_Predecessor: ", err)
-		_ = Close(client)
-		return
-	}
-	_ = Close(client)
+	node.delink_with_predecessor()
+	node.delink_with_successor()
 
 	node.Enabled = false
 }
@@ -615,14 +615,12 @@ func (node *LinkNode) Put(key, value string) bool {
 	if er != nil {
 		return false
 	}
-	err = client.Call("RPCNode.Put_Value", Pair_Type{key, value}, nil)
-	if err != nil {
+	if err = client.Call("RPCNode.Put_Value", Pair_Type{key, value}, nil); err != nil {
 		fmt.Println("RPC Call Failed in Put: Put_Value: ", err)
 		_ = Close(client)
 		return false
 	}
-	err = client.Call("RPCNode.Put_Value_Successor_Backup", Pair_Type{key, value}, nil)
-	if err != nil {
+	if err = client.Call("RPCNode.Put_Value_Successor_Backup", Pair_Type{key, value}, nil); err != nil {
 		fmt.Println("RPC Call Failed in Put: Put_Value_Succcessor_Backup: ", err)
 		_ = Close(client)
 		return false
@@ -650,8 +648,7 @@ func (node *LinkNode) Get(key string) (bool, string) {
 		return false, ""
 	}
 	var value string
-	err = client.Call("RPCNode.Get_Value", key, &value)
-	if err != nil {
+	if err = client.Call("RPCNode.Get_Value", key, &value); err != nil {
 		fmt.Println("RPC Call Failed in Get: Get_Value: ", err)
 		_ = Close(client)
 		return false, ""
@@ -679,14 +676,12 @@ func (node *LinkNode) Delete(key string) bool {
 		return false
 	}
 	var successful bool
-	err = client.Call("RPCNode.Delete_Key", key, &successful)
-	if err != nil {
+	if err = client.Call("RPCNode.Delete_Key", key, &successful); err != nil {
 		fmt.Println("RPC Call Failed in Delete: Delete_Key: ", err)
 		_ = Close(client)
 		return false
 	}
-	err = client.Call("RPCNode.Delete_Key_Successor_Backup", key, new(bool))
-	if err != nil {
+	if err = client.Call("RPCNode.Delete_Key_Successor_Backup", key, new(bool)); err != nil {
 		fmt.Println("RPC Call Failed in Delete: Delete_Key_Succcessor_Backup: ", err)
 		_ = Close(client)
 		return false
