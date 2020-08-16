@@ -88,9 +88,13 @@ func (node *RPCNode) Deliver_Backup(args int, ans *map[string]string) error {
 	return node.Node.Deliver_Backup(args, ans)
 }
 
-func (node *RPCNode) Receive_Quit(delivery *Data_Type, ret *int) error {
+func (node *RPCNode) Deliver_Data(args int, ans *map[string]string) error {
+	return node.Node.Deliver_Data(args, ans)
+}
+
+func (node *RPCNode) Receive_Quit(delivery *map[string]string, ret *int) error {
 	return node.Node.Receive_Quit(delivery, ret)
 }
-func (node *RPCNode) Receive_Quit_Backup(delivery *Data_Type, ret *int) error {
+func (node *RPCNode) Receive_Quit_Backup(delivery *map[string]string, ret *int) error {
 	return node.Node.Receive_Quit_Backup(delivery, ret)
 }
