@@ -39,7 +39,9 @@ func (node *NetNode) Create() {
 
 func (node *NetNode) Join(addr string) (successful bool) {
 	successful = node.core.Node.Join(addr)
-	node.core.Node.Backgrounds()
+	if successful {
+		node.core.Node.Backgrounds()
+	}
 	return
 }
 
