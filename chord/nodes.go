@@ -235,7 +235,35 @@ func (node *LinkNode) Notify(pred Address_Type, ret *int) error {
 		*node.Predecessor = pred
 	} else if Range_Check(pred.ID, node.Predecessor.ID, node.ID,false) {
 		*node.Predecessor = pred
+	} else {
+		return nil
 	}
+	if node.Predecessor.Addr != node.Addr {
+		if !node.Ping(node.Predecessor.Addr) {
+			return errors.New("chord ring unconnected")
+		}
+		client, err := Dial(node.Predecessor.Addr)
+		if err != nil {
+			return err
+		}
+		if err = client.Call("RPCNode.Update_Successor", node.get_address(), nil); err != nil {
+			fmt.Println("RPC Call Failed in Notify: Update_Successor: ", err)
+			_ = Close(client)
+			return err
+		}
+		node.Data_Backup.data_lock.Lock()
+		err = client.Call("RPCNode.Deliver_Data", 0, &node.Data_Backup._M_data)
+		node.Data_Backup.data_lock.Unlock()
+		if err != nil {
+			fmt.Println("RPC Call Failed in Notify: Deliver_Data: ", err)
+			_ = Close(client)
+			return err
+		}
+		if err = Close(client); err != nil {
+			return err
+		}
+	}
+	node.transfer_backup()
 	return nil
 }
 func (node *LinkNode) Stabilize() error {
@@ -288,11 +316,18 @@ func (node *LinkNode) Check_Predecessor() {
 	if node.Predecessor == nil {
 		return
 	}
-	node.node_lock.Lock()
 	if !(node.Ping(node.Predecessor.Addr)) {
+		node.node_lock.Lock()
+		defer node.node_lock.Unlock()
 		node.Predecessor = nil
+		node.validate_successors()
+		if node.Addr==node.Successor[0].Addr {
+			node.transfer_self()
+		} else {
+			node.transfer_deliver()
+		}
+		return
 	}
-	node.node_lock.Unlock()
 }
 func (node *LinkNode) Backgrounds() {
 	go func() {
@@ -424,8 +459,56 @@ func (node *LinkNode) Deliver_Backup(args int, ans *map[string]string) error {
 	return nil
 }
 
+func (node *LinkNode) Deliver_Data(args int, ans *map[string]string) error {
+	node.Data.data_lock.Lock()
+	for k, v := range node.Data._M_data {
+		(*ans)[k] = v
+	}
+	node.Data.data_lock.Unlock()
+	return nil
+}
+
+func (node *LinkNode) transfer_backup() {
+	node.Data.data_lock.Lock()
+	defer node.Data.data_lock.Unlock()
+	node.Data_Backup.data_lock.Lock()
+	defer node.Data_Backup.data_lock.Unlock()
+
+	for k, v := range node.Data._M_data {
+		node.Data_Backup._M_data[k] = v
+	}
+	return
+}
+
+// For ForceQuit
+func (node *LinkNode) transfer_self() {
+	node.Data.data_lock.Lock()
+	defer node.Data.data_lock.Unlock()
+	node.Data_Backup.data_lock.Lock()
+	defer node.Data_Backup.data_lock.Unlock()
+
+	for k, v := range node.Data_Backup._M_data {
+		node.Data._M_data[k] = v
+	}
+	node.Data_Backup._M_data = make(map[string]string)
+	return
+}
+func (node *LinkNode) transfer_deliver() {
+	client, err := Dial(node.Successor[0].Addr)
+	if err != nil {
+		return
+	}
+	if err = client.Call("RPCNode.Receive_Quit_Backup", &node.Data_Backup._M_data, nil); err != nil {
+		fmt.Println("RPC Call Failed in transfer_deliver: Receive_Quit_Backup: ", err)
+		_ = Close(client)
+		return
+	}
+	_ = Close(client)
+	node.transfer_self()
+}
+
 // For Quit
-func (node *LinkNode) Receive_Quit(delivery *Data_Type, ret *int) error {
+func (node *LinkNode) Receive_Quit(delivery *map[string]string, ret *int) error {
 	node.validate_successors()
 	if node.Ping(node.Successor[0].Addr) == false {
 		fmt.Println("Chord Ring Unconnected: ", node.Successor[0].Addr)
@@ -435,38 +518,33 @@ func (node *LinkNode) Receive_Quit(delivery *Data_Type, ret *int) error {
 	if err != nil {
 		return err
 	}
+	if err = client.Call("RPCNode.Receive_Quit_Backup", delivery, nil); err != nil {
+		fmt.Println("RPC Call Failed in Receive_Quit: Receive_Quit_Backup: ", err)
+		_ = Close(client)
+		return err
+	}
+	if err = Close(client); err != nil {
+		return err
+	}
 
-	delivery.data_lock.Lock()
-	defer delivery.data_lock.Unlock()
 	node.Data.data_lock.Lock()
 	defer node.Data.data_lock.Unlock()
 
-	for k, v := range delivery._M_data {
+	for k, v := range (*delivery) {
 		node.Data._M_data[k] = v
 
 		_, found := node.Data_Backup._M_data[k]
 		if found {
 			delete(node.Data_Backup._M_data, k)
 		}
-
-		if err = client.Call("RPCNode.Put_Value_Backup", Pair_Type{k,v}, new(bool)); err != nil {
-			fmt.Println("RPC Call Failed in Receive_Quit: Put_Value_Backup: ", err)
-			_ = Close(client)
-			return err
-		}
-	}
-	if err = Close(client); err != nil {
-		return err
 	}
 	return nil
 }
-func (node *LinkNode) Receive_Quit_Backup(delivery *Data_Type, ret *int) error {
-	delivery.data_lock.Lock()
-	defer delivery.data_lock.Unlock()
+func (node *LinkNode) Receive_Quit_Backup(delivery *map[string]string, ret *int) error {
 	node.Data_Backup.data_lock.Lock()
 	defer node.Data_Backup.data_lock.Unlock()
 
-	for k, v := range delivery._M_data {
+	for k, v := range (*delivery) {
 		node.Data_Backup._M_data[k] = v
 	}
 	return nil
@@ -480,13 +558,17 @@ func (node *LinkNode) transmit_to_successor() {
 	if err != nil {
 		return
 	}
-	err = client.Call("RPCNode.Receive_Quit", &node.Data, nil)
+	node.Data.data_lock.Lock()
+	err = client.Call("RPCNode.Receive_Quit", &node.Data._M_data, nil)
+	node.Data.data_lock.Unlock()
 	if err != nil {
 		fmt.Println("RPC Call Failed in transmit_to_successor: Receive_Quit: ", err)
 		_ = Close(client)
 		return
 	}
-	err = client.Call("RPCNode.Receive_Quit_Backup", &node.Data_Backup, nil)
+	node.Data_Backup.data_lock.Lock()
+	err = client.Call("RPCNode.Receive_Quit_Backup", &node.Data_Backup._M_data, nil)
+	node.Data_Backup.data_lock.Unlock()
 	if err != nil {
 		fmt.Println("RPC Call Failed in transmit_to_successor: Receive_Quit_Backup: ", err)
 		_ = Close(client)
