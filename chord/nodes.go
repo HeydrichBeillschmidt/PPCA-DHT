@@ -263,7 +263,6 @@ func (node *LinkNode) Notify(pred Address_Type, ret *int) error {
 			return err
 		}
 	}
-	node.transfer_backup()
 	return nil
 }
 func (node *LinkNode) Stabilize() error {
@@ -286,11 +285,13 @@ func (node *LinkNode) Stabilize() error {
 			err = node.Update_Successor(predecessor_of_successor, nil)
 			if err != nil {
 				fmt.Println("Successor List Update Failed: ", err)
+				return err
 			}
 			// notify
 			err = pclient.Call("RPCNode.Notify", node.get_address(), nil)
 			if err != nil {
 				fmt.Println("RPC Call Failed in Stabilize: Notify: ", err)
+				return err
 			}
 			return er
 		}
@@ -299,6 +300,7 @@ func (node *LinkNode) Stabilize() error {
 	err = client.Call("RPCNode.Notify", node.get_address(), nil)
 	if err != nil {
 		fmt.Println("RPC Call Failed in Stabilize: Notify: ", err)
+		return err
 	}
 	return nil
 }
@@ -468,18 +470,6 @@ func (node *LinkNode) Deliver_Data(args int, ans *map[string]string) error {
 	return nil
 }
 
-func (node *LinkNode) transfer_backup() {
-	node.Data.data_lock.Lock()
-	defer node.Data.data_lock.Unlock()
-	node.Data_Backup.data_lock.Lock()
-	defer node.Data_Backup.data_lock.Unlock()
-
-	for k, v := range node.Data._M_data {
-		node.Data_Backup._M_data[k] = v
-	}
-	return
-}
-
 // For ForceQuit
 func (node *LinkNode) transfer_self() {
 	node.Data.data_lock.Lock()
@@ -614,6 +604,7 @@ func (node *LinkNode) Join(addr string) bool {
 	}
 	if err = client.Call("RPCNode.Notify", node.get_address(), nil); err != nil {
 		fmt.Println("RPC Call Failed in Join: Notify: ", err)
+		_ = Close(client)
 		return false
 	}
 
@@ -623,6 +614,7 @@ func (node *LinkNode) Join(addr string) bool {
 	node.Data_Backup.data_lock.Unlock()
 	if err != nil {
 		fmt.Println("RPC Call Failed in Join: Deliver_Backup: ", err)
+		_ = Close(client)
 		return false
 	}
 	node.Data.data_lock.Lock()
@@ -630,6 +622,7 @@ func (node *LinkNode) Join(addr string) bool {
 	node.Data.data_lock.Unlock()
 	if err != nil {
 		fmt.Println("RPC Call Failed in Join: Deliver_Part: ", err)
+		_ = Close(client)
 		return false
 	}
 
